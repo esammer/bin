@@ -1,0 +1,130 @@
+#!/bin/sh
+
+GPG=`type -p gpg`
+PASSDB_FILE=${HOME}/.passdb.gpg
+
+error() {
+  msg=$1
+  exit_code=$2
+
+  echo "Error: $msg"
+
+  if [ -n "$exit_code" ] ; then
+    exit $exit_code
+  fi
+}
+
+display_help() {
+  echo "usage: $0 [ -h | -a | -s | -e ]
+
+  --add,-a      add a password to the database
+  --show,-s     show a password for a service
+  --edit,-e     open the password database in EDITOR:$EDITOR
+  --help,-h,-?  display this help text
+"
+}
+
+add_password() {
+  echo -n "Enter service name: "
+  read srv
+
+  if [ -z "$srv" ] ; then
+    echo "Empty service - aborting"
+    return
+  fi
+
+  echo -n "Enter password: "
+  stty -echo
+  read p1
+  stty echo
+
+  if [ -z "$p1" ] ; then
+    echo "Empty password - aborting"
+    return
+  fi
+
+  echo -n "Enter password (again): "
+  stty -echo
+  read p2
+  stty echo
+
+  if [ "$p1" != "$p2" ] ; then
+    error "Passwords do not match" 102
+  fi
+
+  oldumask=`umask`
+  umask 0177 > /dev/null
+  DECRYPTED_FILE="$HOME/.passdb.$$"
+  $GPG --decrypt -o $DECRYPTED_FILE $PASSDB_FILE || error "Unable to decrypt $PASSDB_FILE as $DECRYPTED_FILE" 1
+  if [ ! -f "$DECRYPTED_FILE" ] ; then
+    error "Unable to find decrypted file at $DECRYPTED_FILE!" 103
+  fi
+
+  echo "$srv\t$p1" >> $DECRYPTED_FILE || error "Unable to write new entry into $DECRYPTED_FILE" 1
+  sort $DECRYPTED_FILE > $DECRYPTED_FILE.sorted || error "Unable to sort $DECRYPTED_FILE (or write $DECRYPTED_FILE.sorted)" 1
+  mv $DECRYPTED_FILE.sorted $DECRYPTED_FILE || error "Unable to mv $DECRYPTED_FILE.sorted to $DECRYPTED_FILE" 1
+
+  $GPG --encrypt -r 'esammer@cloudera.com' $DECRYPTED_FILE || error "Unable to encrypt $DECRYPTED_FILE" 1
+  rm -f $DECRYPTED_FILE || error "Unable to remove $DECRYPTED_FILE after encrypting" 1
+  mv $DECRYPTED_FILE.gpg $PASSDB_FILE || error "Unable to mv $DECRYPTED_FILE.gpg to $PASSDB_FILE" 1
+  umask $oldumask > /dev/null
+}
+
+show_password() {
+  echo -n "Enter service name: "
+  read srv
+
+  $GPG --decrypt $PASSDB_FILE | grep -E "^$srv"
+}
+
+edit_passwords() {
+  [ -n "$EDITOR" ] || error "Unable to determine editor (EDITOR not set)" 104
+
+  umask 0177 > /dev/null
+  DECRYPTED_FILE="$HOME/.passdb.$$"
+  $GPG --decrypt -o $DECRYPTED_FILE $PASSDB_FILE || error "Unable to decrypt $PASSDB_FILE as $DECRYPTED_FILE" 1
+  if [ ! -f "$DECRYPTED_FILE" ] ; then
+    error "Unable to find decrypted file at $DECRYPTED_FILE!" 103
+  fi
+
+  $EDITOR $DECRYPTED_FILE
+
+  if [ "$?" -eq 0 ] ; then
+    echo "Updating password database"
+    $GPG --encrypt -r 'esammer@cloudera.com' $DECRYPTED_FILE || error "Unable to encrypt $DECRYPTED_FILE" 1
+    mv $DECRYPTED_FILE.gpg $PASSDB_FILE || error "Unable to mv $DECRYPTED_FILE.gpg $PASSDB_FILE" 1
+  else
+    echo "Not updating password database - editor exited with a non-zero status"
+  fi
+
+  rm -f $DECRYPTED_FILE || error "Unable to remove $DECRYPTED_FILE"
+  umask $oldumask > /dev/null
+}
+
+[ -n "$HOME" ] || error "Unable to figure out password file location from HOME (not set)" 100
+[ -n "$GPG" ] || error "Unable to locate gpg binary" 101
+
+[ "$#" -gt 0 ] || { error "Not enough arguments. Displaying help." ; display_help ; }
+
+while [ -n "$*" ] ; do
+  arg=$1
+  shift
+
+  case "$arg" in
+    --add|-a)
+      add_password
+      ;;
+    --show|-s)
+      show_password
+      ;;
+    --edit|-e)
+      edit_passwords
+      ;;
+    --help|-h|-?)
+      display_help
+      ;;
+    *)
+      error "Unrecognized option \"$arg\""
+  esac
+done
+
